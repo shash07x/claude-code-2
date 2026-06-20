@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: teamsync-db
+    environment:
+      POSTGRES_USER: teamsync
+      POSTGRES_PASSWORD: teamsync
+      POSTGRES_DB: teamsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - teamsync_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teamsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  teamsync_pgdata:
