@@ -1,0 +1,2 @@
+- [TeamSync Isolation Audit Jun 2026](project-isolation-audit-2026-06-20.md) — First full audit; all PENDING MIGRATION (user_id scoping), no HIGH/CRITICAL, one missing test gap (PATCH /{issue_id} cross-user)
+- [TeamSync Workspace Commit Audit 2026-06-22](project-isolation-audit-2026-06-22.md) — Workspace hierarchy commit: 1 HIGH (SET NULL orphan risk), 1 MEDIUM (board mixes workspaces), 1 LOW (no workspace isolation tests). Core ownership checks are SAFE.

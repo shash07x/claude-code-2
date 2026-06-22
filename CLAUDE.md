@@ -59,7 +59,8 @@ Request flow: **route → service → model**, with security/token helpers under
 - The startup `create_all()` is a dev convenience; **production schema should be managed with Alembic** (not yet set up).
 - Password rules (≥8 chars, letter + number) live in `app/schemas/auth.py::validate_password_strength` — reuse it, don't duplicate.
 - Password-reset request always returns 202 and login errors are generic — intentional, to avoid account enumeration. Preserve this.
-- `SECRET_KEY` defaults to a dev placeholder; it must be overridden in production.
+- `SECRET_KEY` defaults to a dev placeholder; it must be overridden in production (config now **raises** if the dev key is used when `ENVIRONMENT=production` — see **Security hardening**).
+- Tests patch `settings.COOKIE_SECURE = False` in `conftest.py` so httpx sends cookies over `http://test`. **Don't remove it** — the refresh-rotation and logout tests break otherwise (Secure cookies are dropped on plain HTTP).
 - Frontend pins `next@14.2.35` (patched). Avoid `npm audit fix --force` — it pushes a breaking major (Next 16).
 
 ## Notification Center
@@ -79,7 +80,7 @@ Request flow: **route → service → model**, with security/token helpers under
 
 ## Sprint Board (Kanban)
 
-The first piece of the core domain. **Issues are scoped per-user** (`issues.user_id`), like notifications — there is no workspace/project hierarchy yet, so the board is effectively a personal Kanban. Adding project scoping later means adding a `project_id` and filtering; the ordering model below is unaffected.
+The first piece of the core domain. **Issues are scoped per-user** (`issues.user_id`), like notifications. Issues also carry a **nullable** `workspace_id` (see **Workspaces**), but the board still groups by `(user_id, status)` only — it does **not** yet filter by workspace, so it remains effectively a personal Kanban. The ordering model below is unaffected by workspace scoping.
 
 ### Ordering model (important)
 Every issue has an integer `position` that is **0-based and contiguous within its `(user_id, status)` column**. The four columns are fixed: `backlog | in_progress | review | done` (order + labels live in `app/schemas/issue.py::BOARD_COLUMNS` / `COLUMN_LABELS` — the single source of truth, mirrored on the frontend).
@@ -87,10 +88,10 @@ Every issue has an integer `position` that is **0-based and contiguous within it
 - **`new_index` semantics:** the index within the target column's list **excluding the dragged card**. The frontend computes exactly this, so there's no off-by-one across the wire.
 
 ### Backend
-- `app/models/issue.py` — `Issue` (`title`, `description`, `status`, `position`, `priority`). `status`/`priority` are `String` (not DB enums) for portability. `issues` relationship added to `User`.
+- `app/models/issue.py` — `Issue` (`title`, `description`, `status`, `position`, `priority`, nullable `workspace_id` FK→workspaces `ON DELETE SET NULL`). `status`/`priority` are `String` (not DB enums) for portability. `issues` relationship added to `User`; `workspace` relationship to `Workspace`.
 - `app/services/issue_service.py` — board/create/update/move/delete (see ordering model above).
 - `app/api/routes/issues.py` — `/api/v1/issues`: `GET /board` (grouped into the 4 columns), `POST /`, `PATCH /{id}`, `PATCH /{id}/move` (persists a drop), `DELETE /{id}`. All require `get_current_user` and enforce ownership (404 otherwise). **Note:** update/move routes call `await db.refresh(issue)` after commit — the `onupdate` `updated_at` is server-generated and would otherwise fail an async lazy-load during serialization.
-- `tests/test_issues.py` — 19 tests covering append, grouping/order, move within & across columns, contiguous re-indexing, clamp, validation, and ownership isolation.
+- `tests/test_issues.py` — 20 tests covering append, grouping/order, move within & across columns, contiguous re-indexing, clamp, validation, and ownership isolation (incl. a cross-user PATCH ownership test).
 
 ### Frontend
 - `Issue` / `BoardColumn` / `BoardResponse` types + `issuesApi` (board, create, update, move, delete) in `lib/api.ts`.
@@ -99,19 +100,36 @@ Every issue has an integer `position` that is **0-based and contiguous within it
 
 ## CSV Bulk Importer
 
-Imports Jira / Linear / Trello CSV exports as issues onto the per-user board. **No new model** — it maps each external row onto the existing `Issue` (title/description/status/priority) and reuses `issue_service.create_issue` so column ordering + per-user scoping stay consistent. Because `Issue` only has those four fields, every other column is reported as **unmapped (dropped)** rather than silently lost.
+Imports Jira / Linear / Trello CSV exports as issues onto the per-user board. **No new model** — it maps each external row onto the existing `Issue` (title/description/status/priority) and reuses `issue_service.create_issue` so column ordering + per-user scoping stay consistent. Because `Issue` only has those four fields, every other column is reported as **unmapped (dropped)** rather than silently lost. Commits may optionally target a workspace: `commit_import` accepts a `workspace_id` that is threaded into each `create_issue` (it is a commit parameter, not a CSV column).
 
 ### Per-format adapters (independent workstreams)
 - `app/services/importers/` — one module per source sharing a `FormatAdapter` base (`base.py`): `jira.py`, `linear.py`, `trello.py`, plus `__init__.py` (registry + `get_adapter` / `detect_adapter`).
   - Adapters work on **lower-cased, stripped header keys** (the service normalizes rows before mapping). Generic adapters are column-driven (`title_field`, `status_map`, `priority_map`, …); **Trello overrides** `_map_status` (substring-match on the free-text *list name*) and `_map_priority` (keyword-match on *labels* — Trello has no priority column).
   - **Auto-detection order matters:** Jira (`Summary`) and Trello (`Card Name`) are checked before Linear (generic `Title`). `mapped_fields()` drives unmapped-column reporting.
 - `app/services/import_service.py` — orchestration: `_parse_csv` (BOM-stripped `csv.DictReader`), `_map_rows` (skips blank lines, keeps 1-based CSV line numbers), `_validate` (generic rules: title required → row invalid; title/description length-truncate → warning). `build_preview` is a pure dry-run (no writes); `commit_import` persists only valid rows. Raises `CsvImportError` (→ 422); **not** the builtin `ImportError`.
-- `app/api/routes/imports.py` — `/api/v1/imports`: `POST /preview` (dry-run), `POST /commit` (persists, then `db.commit()`). Both require `get_current_user`. Input is raw CSV **text in a JSON body** (frontend reads the file), so no multipart handling.
-- `tests/test_imports.py` — 20 tests: per-format mapping, auto-detect + explicit-source override, undetectable→422, validation/truncation/unmapped reporting, preview-doesn't-write, commit appends+reindexes, skips invalid, per-user isolation.
+- `app/api/routes/imports.py` — `/api/v1/imports`: `POST /preview` (dry-run), `POST /commit` (persists, then `db.commit()`). Both require `get_current_user`. Input is raw CSV **text in a JSON body** (frontend reads the file), so no multipart handling. `ImportCommitRequest` accepts an optional `workspace_id`; `/commit` validates the caller owns that workspace (404 otherwise) before persisting.
+- `tests/test_imports.py` — 23 tests: per-format mapping, auto-detect + explicit-source override, undetectable→422, validation/truncation/unmapped reporting, preview-doesn't-write, commit appends+reindexes, skips invalid, per-user isolation, and per-importer `workspace_id` writes.
 
 ### Frontend
 - `ImportSource` / `ImportRowPreview` / `ImportPreviewResponse` / `ImportCommitResponse` types + `importsApi` (preview, commit) in `lib/api.ts`.
 - `components/csv-importer.tsx` — file upload (FileReader → text) or paste, format select (auto/jira/linear/trello), **preview-before-import** table (per-row status/priority badges + error/warning notes, dropped-columns banner), then commit. `app/import/page.tsx` is the protected `/import` page, linked from the dashboard and the board header. Importer CSS is at the bottom of `app/globals.css`.
 
+## Workspaces
+
+The top-level multi-tenant scope. **Owner-only authorization — there is no membership table yet**, so a workspace is reachable only by its creator.
+
+- `app/models/workspace.py` — `Workspace` (`name`, `owner_id` FK→users `ON DELETE CASCADE`). `owned_workspaces` relationship added to `User`; `issues` relationship to `Issue`.
+- `app/schemas/workspace.py` — `WorkspaceCreate` (`name` 1–100 chars), `WorkspaceRead`.
+- `app/services/workspace_service.py` — `create_workspace`, `get_workspace`.
+- `app/api/routes/workspaces.py` — `/api/v1/workspaces`: `POST /` (201), `GET /{id}` (404 if the caller isn't the owner). Both require `get_current_user`.
+- `Issue` gained a **nullable** `workspace_id` FK (`ON DELETE SET NULL`) for backward compatibility; `issue_service.create_issue` accepts an optional `workspace_id`. Existing per-user issues keep `workspace_id = NULL`.
+
+## Security hardening
+
+- **Rate limiting** (`slowapi`): shared limiter in `app/core/limiter.py`, wired in `main.py` (`app.state.limiter` + 429 handler). Auth limits: signup `10/minute`, login `5/minute`, password-reset-request `3/minute`.
+- **Security-headers middleware** (`main.py`): `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy` on every response; `Strict-Transport-Security` added **in production only**.
+- **Cookies & config** (`app/core/config.py`): `COOKIE_SECURE` defaults to `True` (HTTPS-only); config **raises** if `SECRET_KEY` is the dev placeholder under `ENVIRONMENT=production`, and enforces `COOKIE_SAMESITE=none ⇒ COOKIE_SECURE=true`. New knobs: `ENVIRONMENT` (development|test|production), `CORS_ORIGINS`.
+- CORS is restricted via `CORS_ORIGINS` (still `allow_credentials=True` for the refresh cookie).
+
 ## Status
-Built so far: auth + Notification Center + Sprint Board (Kanban) + CSV Bulk Importer. **75 backend tests passing** (17 auth + 19 notifications + 19 issues + 20 imports). Frontend production build clean (11 routes). Workspace/project hierarchy is still not built — issues are per-user. Product docs in `docs/` are planned but only `docs/README.md` exists.
+Built so far: auth + Notification Center + Sprint Board (Kanban) + CSV Bulk Importer + Workspaces. **79 backend tests passing** (17 auth + 19 notifications + 20 issues + 23 imports). Frontend production build clean (11 routes). Workspace model now exists (owner-only, no membership table yet); issues carry a nullable `workspace_id`. Project hierarchy and workspace membership are still not built. Product docs in `docs/` are planned but only `docs/README.md` exists.
