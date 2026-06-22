@@ -21,6 +21,12 @@ class Issue(Base, TimestampMixin):
         index=True,
         nullable=False,
     )
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(2000), nullable=True)
@@ -38,6 +44,7 @@ class Issue(Base, TimestampMixin):
     priority: Mapped[str] = mapped_column(String(10), default="medium", nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="issues")  # noqa: F821
+    workspace: Mapped["Workspace | None"] = relationship("Workspace", back_populates="issues")  # noqa: F821
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Issue {self.title!r} {self.status} pos={self.position}>"

@@ -273,6 +273,19 @@ async def test_cannot_move_another_users_issue(client, db_session):
     assert r.status_code == 404
 
 
+async def test_cannot_update_another_users_issue(client, db_session):
+    token_a = await _signup(client, "a@example.com")
+    token_b = await _signup(client, "b@example.com", password="Password456")
+    a = await _create(client, token_a, "A")
+
+    r = await client.patch(
+        f"{BASE}/{a['id']}",
+        headers=_headers(token_b),
+        json={"title": "Hijacked"},
+    )
+    assert r.status_code == 404
+
+
 async def test_cannot_delete_another_users_issue(client, db_session):
     token_a = await _signup(client, "a@example.com")
     token_b = await _signup(client, "b@example.com", password="Password456")

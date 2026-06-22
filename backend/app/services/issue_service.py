@@ -66,11 +66,13 @@ async def create_issue(
     description: str | None = None,
     status: str = "backlog",
     priority: str = "medium",
+    workspace_id: uuid.UUID | None = None,
 ) -> Issue:
     # Append to the end of the target column.
     existing = await _ordered_column(db, user_id=user_id, status=status)
     issue = Issue(
         user_id=user_id,
+        workspace_id=workspace_id,
         title=title,
         description=description,
         status=status,

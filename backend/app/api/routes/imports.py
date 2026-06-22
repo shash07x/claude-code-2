@@ -17,7 +17,7 @@ from app.schemas.imports import (
     ImportPreviewRequest,
     ImportPreviewResponse,
 )
-from app.services import import_service
+from app.services import import_service, workspace_service
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 
@@ -41,12 +41,19 @@ async def commit_import(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ImportCommitResponse:
+    if payload.workspace_id is not None:
+        ws = await workspace_service.get_workspace(db, workspace_id=payload.workspace_id)
+        if ws is None or ws.owner_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
+            )
     try:
         source, imported, skipped = await import_service.commit_import(
             db,
             user_id=current_user.id,
             csv_text=payload.csv_text,
             source=payload.source,
+            workspace_id=payload.workspace_id,
         )
     except import_service.CsvImportError as exc:
         raise HTTPException(

@@ -34,6 +34,12 @@ from app.services.importers import (
 )
 
 
+_MAX_ROWS = 10_000
+
+# M5: Characters that begin spreadsheet formula injection payloads.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
 class CsvImportError(Exception):
     """Un-importable input: malformed CSV or an unrecognizable source."""
 
@@ -54,6 +60,11 @@ def _parse_csv(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
         rows.append(
             {(k or "").strip().lower(): (v or "") for k, v in raw.items()}
         )
+    # H1: hard cap to prevent DoS from pathologically large CSVs.
+    if len(rows) > _MAX_ROWS:
+        raise CsvImportError(
+            f"CSV exceeds the {_MAX_ROWS:,}-row limit. Split the file and import in batches."
+        )
     return display_headers, rows
 
 
@@ -73,19 +84,30 @@ def _resolve_adapter(
     return adapter, True
 
 
+def _strip_formula(value: str) -> str:
+    """M5: Prefix formula-injection payloads with a single quote (Excel-safe)."""
+    if value and value[0] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 def _validate(mapped: MappedIssue) -> None:
     """Apply generic (format-independent) rules in place: title + length."""
     if not mapped.title:
         mapped.errors.append("Missing a title - this row will be skipped.")
-    elif len(mapped.title) > TITLE_MAX:
-        mapped.title = mapped.title[:TITLE_MAX]
-        mapped.warnings.append(f"Title truncated to {TITLE_MAX} characters.")
+    else:
+        mapped.title = _strip_formula(mapped.title)
+        if len(mapped.title) > TITLE_MAX:
+            mapped.title = mapped.title[:TITLE_MAX]
+            mapped.warnings.append(f"Title truncated to {TITLE_MAX} characters.")
 
-    if mapped.description and len(mapped.description) > DESCRIPTION_MAX:
-        mapped.description = mapped.description[:DESCRIPTION_MAX]
-        mapped.warnings.append(
-            f"Description truncated to {DESCRIPTION_MAX} characters."
-        )
+    if mapped.description:
+        mapped.description = _strip_formula(mapped.description)
+        if len(mapped.description) > DESCRIPTION_MAX:
+            mapped.description = mapped.description[:DESCRIPTION_MAX]
+            mapped.warnings.append(
+                f"Description truncated to {DESCRIPTION_MAX} characters."
+            )
 
 
 def _is_blank(row: dict[str, str]) -> bool:
@@ -149,6 +171,7 @@ async def commit_import(
     user_id: uuid.UUID,
     csv_text: str,
     source: str | None = None,
+    workspace_id: uuid.UUID | None = None,
 ) -> tuple[str, int, int]:
     """Persist valid rows as issues. Returns (source, imported, skipped).
 
@@ -172,6 +195,7 @@ async def commit_import(
             description=mapped.description,
             status=mapped.status,
             priority=mapped.priority,
+            workspace_id=workspace_id,
         )
         imported += 1
 

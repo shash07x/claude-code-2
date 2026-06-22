@@ -20,6 +20,10 @@ from app.core.security import (
 from app.models.token import PasswordResetToken, RefreshToken
 from app.models.user import User
 
+# M3: Pre-computed dummy hash so the timing of a failed login (unknown email) is
+# always one bcrypt verify, not one hash + one verify on a fresh random salt.
+_DUMMY_HASH = hash_password("dummy-placeholder-xyzzy-never-matches-real-user")
+
 
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -59,11 +63,12 @@ async def authenticate(
     db: AsyncSession, *, email: str, password: str
 ) -> User | None:
     user = await get_user_by_email(db, email)
-    if user is None:
-        # Run a dummy verify to keep timing roughly constant (reduce enumeration).
-        verify_password(password, hash_password("dummy-password-123"))
+    # M3: Always run exactly one bcrypt verify so response time doesn't reveal
+    # whether the email exists (compare against pre-computed hash when no user).
+    stored_hash = user.hashed_password if user else _DUMMY_HASH
+    if not verify_password(password, stored_hash):
         return None
-    if not user.is_active or not verify_password(password, user.hashed_password):
+    if user is None or not user.is_active:
         return None
     return user
 
@@ -113,13 +118,38 @@ async def revoke_refresh_token(db: AsyncSession, token: RefreshToken) -> None:
 
 
 async def revoke_all_user_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
+    now = _utcnow()
     await db.execute(
         update(RefreshToken)
         .where(
             RefreshToken.user_id == user_id,
             RefreshToken.revoked_at.is_(None),
         )
+        .values(revoked_at=now)
+    )
+    # L5: Also expire any outstanding password-reset tokens so a reset link
+    # obtained before a password change can't be used after the fact.
+    await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+
+
+async def prune_expired_tokens(db: AsyncSession) -> None:
+    """M4: Delete refresh + reset token rows that are fully expired and revoked.
+
+    Call periodically (e.g. from a Celery beat task) to keep the tables bounded.
+    """
+    cutoff = _utcnow() - dt.timedelta(days=1)
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.expires_at < cutoff)
         .values(revoked_at=_utcnow())
+        .execution_options(synchronize_session=False)
     )
 
 
@@ -133,7 +163,10 @@ async def rotate_refresh_token(
     """Revoke the presented token and issue a fresh one for the same user."""
     await revoke_refresh_token(db, old_token)
     user = await get_user_by_id(db, old_token.user_id)
-    assert user is not None
+    # H5: explicit guard — assert is stripped by -O and would produce a
+    # confusing AttributeError rather than a clean error.
+    if user is None:
+        raise ValueError(f"User {old_token.user_id} not found during token rotation")
     return await create_refresh_token(
         db, user=user, user_agent=user_agent, ip_address=ip_address
     )
@@ -174,7 +207,9 @@ async def reset_password(
     db: AsyncSession, *, token: PasswordResetToken, new_password: str
 ) -> None:
     user = await get_user_by_id(db, token.user_id)
-    assert user is not None
+    # H5: explicit guard — assert is stripped by -O.
+    if user is None:
+        raise ValueError(f"User {token.user_id} not found during password reset")
     user.hashed_password = hash_password(new_password)
     token.used_at = _utcnow()
     # Security: invalidate every existing session after a password change.

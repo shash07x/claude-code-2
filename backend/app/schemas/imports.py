@@ -1,6 +1,7 @@
 """CSV bulk-import request/response schemas."""
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -14,8 +15,12 @@ SOURCE_LABELS: dict[str, str] = {
 }
 
 
+_CSV_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
 class ImportPreviewRequest(BaseModel):
-    csv_text: str = Field(..., min_length=1)
+    # H1: cap body size to prevent DoS via huge uploads.
+    csv_text: str = Field(..., min_length=1, max_length=_CSV_MAX_BYTES)
     # Omit to auto-detect the source from the CSV header row.
     source: ImportSource | None = None
 
@@ -43,8 +48,11 @@ class ImportPreviewResponse(BaseModel):
 
 
 class ImportCommitRequest(BaseModel):
-    csv_text: str = Field(..., min_length=1)
+    # H1: same cap as preview.
+    csv_text: str = Field(..., min_length=1, max_length=_CSV_MAX_BYTES)
     source: ImportSource | None = None
+    # Optional workspace to scope the created issues under.
+    workspace_id: uuid.UUID | None = None
 
 
 class ImportCommitResponse(BaseModel):

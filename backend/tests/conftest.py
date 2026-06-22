@@ -12,9 +12,14 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (register models on Base.metadata)
+from app.core.config import settings
 from app.core.database import Base, get_db
 from app.main import app
 from app.services.email import EmailMessage, EmailSender, get_email_sender
+
+# COOKIE_SECURE=True (production default) causes httpx to drop the refresh
+# cookie on plain http://test requests — patch it off for all test clients.
+settings.COOKIE_SECURE = False
 
 TEST_DB_URL = "sqlite+aiosqlite://"  # in-memory
 

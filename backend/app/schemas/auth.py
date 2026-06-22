@@ -27,6 +27,18 @@ class SignupRequest(BaseModel):
 
     _check_password = field_validator("password")(validate_password_strength)
 
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def _sanitize_full_name(cls, v: object) -> object:
+        # M6: strip whitespace and reject control characters so the value is
+        # safe to embed in email templates, PDFs, and future admin views.
+        if v is None:
+            return v
+        s = str(v).strip()
+        if any(ord(c) < 32 for c in s):
+            raise ValueError("full_name must not contain control characters")
+        return s or None
+
 
 class LoginRequest(BaseModel):
     email: EmailStr

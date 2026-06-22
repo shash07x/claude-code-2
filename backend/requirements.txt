@@ -7,6 +7,7 @@ pydantic-settings>=2.3,<3
 email-validator>=2.1
 PyJWT>=2.8,<3
 bcrypt>=4.1,<5
+slowapi>=0.1.9            # C2: per-IP rate limiting on auth endpoints
 
 # --- Database drivers ---
 aiosqlite>=0.20            # default dev DB (SQLite)

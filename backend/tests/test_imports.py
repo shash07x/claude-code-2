@@ -1,11 +1,17 @@
 """Tests for the CSV bulk importer (Jira / Linear / Trello)."""
 from __future__ import annotations
 
+import uuid
+
+from sqlalchemy import select
+
 from app.core.config import settings
+from app.models.issue import Issue
 
 BASE = settings.API_V1_PREFIX + "/imports"
 ISSUES_BASE = settings.API_V1_PREFIX + "/issues"
 AUTH_BASE = settings.API_V1_PREFIX + "/auth"
+WORKSPACES_BASE = settings.API_V1_PREFIX + "/workspaces"
 
 
 # ---------------------------------------------------------------------------
@@ -33,12 +39,25 @@ async def _preview(client, token, csv_text, source=None):
     )
 
 
-async def _commit(client, token, csv_text, source=None):
+async def _commit(client, token, csv_text, source=None, workspace_id=None):
+    body: dict = {"csv_text": csv_text, "source": source}
+    if workspace_id is not None:
+        body["workspace_id"] = str(workspace_id)
     return await client.post(
         f"{BASE}/commit",
         headers=_headers(token),
-        json={"csv_text": csv_text, "source": source},
+        json=body,
     )
+
+
+async def _create_workspace(client, token, name="Test Workspace") -> uuid.UUID:
+    r = await client.post(
+        f"{WORKSPACES_BASE}/",
+        headers=_headers(token),
+        json={"name": name},
+    )
+    assert r.status_code == 201, r.text
+    return uuid.UUID(r.json()["id"])
 
 
 async def _board(client, token) -> dict[str, list[dict]]:
@@ -274,3 +293,49 @@ async def test_commit_isolated_per_user(client, db_session):
 
     board_b = await _board(client, token_b)
     assert all(items == [] for items in board_b.values())
+
+
+# ---------------------------------------------------------------------------
+# Workspace scoping — goal: all three importers write correct workspace_id
+# ---------------------------------------------------------------------------
+
+async def test_jira_import_writes_workspace_id(client, db_session):
+    token = await _signup(client)
+    ws_id = await _create_workspace(client, token, "Jira WS")
+
+    r = await _commit(client, token, JIRA_CSV, workspace_id=ws_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 3
+
+    result = await db_session.execute(select(Issue).where(Issue.workspace_id == ws_id))
+    issues = result.scalars().all()
+    assert len(issues) == 3
+    assert all(i.workspace_id == ws_id for i in issues)
+
+
+async def test_linear_import_writes_workspace_id(client, db_session):
+    token = await _signup(client)
+    ws_id = await _create_workspace(client, token, "Linear WS")
+
+    r = await _commit(client, token, LINEAR_CSV, workspace_id=ws_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 2
+
+    result = await db_session.execute(select(Issue).where(Issue.workspace_id == ws_id))
+    issues = result.scalars().all()
+    assert len(issues) == 2
+    assert all(i.workspace_id == ws_id for i in issues)
+
+
+async def test_trello_import_writes_workspace_id(client, db_session):
+    token = await _signup(client)
+    ws_id = await _create_workspace(client, token, "Trello WS")
+
+    r = await _commit(client, token, TRELLO_CSV, workspace_id=ws_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 3
+
+    result = await db_session.execute(select(Issue).where(Issue.workspace_id == ws_id))
+    issues = result.scalars().all()
+    assert len(issues) == 3
+    assert all(i.workspace_id == ws_id for i in issues)

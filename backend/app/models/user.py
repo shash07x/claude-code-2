@@ -39,6 +39,9 @@ class User(Base, TimestampMixin):
     issues: Mapped[list["Issue"]] = relationship(  # noqa: F821
         back_populates="user", cascade="all, delete-orphan"
     )
+    owned_workspaces: Mapped[list["Workspace"]] = relationship(  # noqa: F821
+        back_populates="owner", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<User {self.email}>"
