@@ -43,3 +43,4 @@ same-origin — a planned enhancement, not needed for the MVP.
 ```bash
 npm run build      # type-checks and compiles all routes
 ```
+<!-- cd verify Wed, Jun 24, 2026 10:45:25 PM -->
