@@ -34,7 +34,7 @@ export default function LoginPage() {
         <div className="brand">
           Team<span>Sync</span>
         </div>
-        <div className="subtitle">Welcome back. Log in to your workspace.</div>
+        <div className="subtitle">Welcome back. Log in to your workspace. (CD Demo · Build 1)</div>
 
         {error && <div className="alert error">{error}</div>}
 
