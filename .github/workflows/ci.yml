@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Detect which app changed so we only run the relevant job. A change to this
+  # workflow file re-runs both, as a safety net.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  backend-tests:
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Tests use an in-memory SQLite DB (see tests/conftest.py) — no Postgres
+      # service is needed and the app's real engine is never touched.
+      - name: Run pytest
+        run: python -m pytest -q
+
+  frontend-build:
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `next build` is also the full TypeScript type-check gate (no separate
+      # tsc script) — see CLAUDE.md.
+      - name: Build
+        run: npm run build
+
+  # Single required status check. Because backend-tests / frontend-build are
+  # path-gated, a frontend-only PR *skips* backend-tests (and vice versa). A
+  # skipped job reports "skipped", which would leave a branch-protection rule
+  # that requires those jobs by name waiting forever. This aggregator always
+  # runs, treats skips as acceptable, and fails only on a real failure or
+  # cancellation — so branch protection should require `ci-ok`, not the two
+  # underlying jobs.
+  ci-ok:
+    needs: [backend-tests, frontend-build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no upstream job failed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "A required upstream job failed or was cancelled."
+            exit 1
+          fi
+          echo "All upstream jobs succeeded or were skipped."
